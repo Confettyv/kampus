@@ -1,0 +1,35 @@
+@startuml
+!pragma layout smetana
+skinparam dpi 150
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam roundCorner 14
+skinparam ArrowColor #2E6B45
+skinparam rectangle {
+  BackgroundColor #FBFBF8
+  BorderColor #9DB8A6
+}
+skinparam database {
+  BackgroundColor #EAF3EC
+  BorderColor #2E6B45
+}
+left to right direction
+title Кампус — архитектура
+
+actor "Студент\nтелефон или ПК" as user
+rectangle "Сервер · Docker Compose" as srv {
+  rectangle "nginx\nHTTPS · Let's Encrypt\nраздаёт фронтенд" as nginx
+  rectangle "Фронтенд\nReact 19 · TypeScript\nVite · Tailwind" as fe
+  rectangle "API\nNode.js 24 · Express\nZod · argon2" as api
+  database "PostgreSQL 16\nPrisma" as db
+}
+rectangle "GitHub\nActions: линт · тесты · сборка" as gh
+rectangle "Бэкап\npg_dump раз в сутки" as bk
+
+user --> nginx : HTTPS
+nginx --> fe : статика
+nginx --> api : /api/*
+api --> db : SQL
+gh ..> srv : выкладка тега
+db ..> bk
+@enduml

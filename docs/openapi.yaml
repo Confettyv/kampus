@@ -1,0 +1,728 @@
+openapi: 3.1.0
+info:
+  title: Кампус API
+  version: 0.1.0
+  description: |
+    Контракт между фронтендом и бэкендом. Деньги — целые копейки, даты — ISO 8601
+    (`2026-10-09`, `2026-10-09T14:30:00Z`). Сессия — cookie `kampus_session` (httpOnly).
+    Чужой или несуществующий ресурс — 404. Ошибка — всегда `Error`.
+servers:
+  - url: /api
+tags:
+  - name: Аккаунт
+  - name: Бюджет
+  - name: Сплит
+  - name: Защита
+  - name: Скидки
+security:
+  - session: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [Аккаунт]
+      summary: Регистрация и вход сразу
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 128 }
+                name: { type: string, minLength: 1, maxLength: 60 }
+      responses:
+        "201":
+          description: Создан, cookie сессии выставлена
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /auth/login:
+    post:
+      tags: [Аккаунт]
+      summary: Вход
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Вход выполнен, cookie сессии выставлена
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooMany" }
+
+  /auth/logout:
+    post:
+      tags: [Аккаунт]
+      summary: Выход — сессия гасится на сервере
+      responses:
+        "204": { description: Вышли }
+
+  /me:
+    get:
+      tags: [Аккаунт]
+      summary: Текущий пользователь
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }, description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Аккаунт]
+      summary: Изменить имя или корпус
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+                campus: { $ref: "#/components/schemas/Campus" }
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }, description: OK }
+        "400": { $ref: "#/components/responses/Invalid" }
+    delete:
+      tags: [Аккаунт]
+      summary: Удалить аккаунт и все его данные
+      description: Операции, бюджет и сессии удаляются. В группах имя заменяется на «Удалённый участник», суммы остаются, чтобы балансы соседей не изменились.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "204": { description: Удалён }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /budget:
+    get:
+      tags: [Бюджет]
+      summary: Настройки бюджета
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Budget" } } }, description: OK }
+        "404": { description: Бюджет ещё не настроен — показать экран настройки }
+    put:
+      tags: [Бюджет]
+      summary: Задать стипендию и дату следующей
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/BudgetInput" } } }
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Budget" } } }, description: OK }
+        "400": { $ref: "#/components/responses/Invalid" }
+
+  /budget/today:
+    get:
+      tags: [Бюджет]
+      summary: Сколько можно потратить сегодня
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Today" } } }, description: OK }
+        "404": { description: Бюджет не настроен }
+
+  /budget/operations:
+    get:
+      tags: [Бюджет]
+      summary: Операции, новые сверху
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: category, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Operation" } }
+                  next: { $ref: "#/components/schemas/NextCursor" }
+    post:
+      tags: [Бюджет]
+      summary: Добавить трату или доход
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/OperationInput" } } }
+      responses:
+        "201":
+          description: Создана; в ответе — пересчитанный лимит
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, today]
+                properties:
+                  operation: { $ref: "#/components/schemas/Operation" }
+                  today: { $ref: "#/components/schemas/Today" }
+        "400": { $ref: "#/components/responses/Invalid" }
+
+  /budget/operations/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    delete:
+      tags: [Бюджет]
+      summary: Удалить операцию
+      responses:
+        "204": { description: Удалена }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /budget/categories:
+    get:
+      tags: [Бюджет]
+      summary: Категории операций
+      security: []
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Category" } } } }
+
+  /budget/summary:
+    get:
+      tags: [Бюджет]
+      summary: Итоги периода по категориям (желательное)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [period_start, period_end, spent, by_category]
+                properties:
+                  period_start: { type: string, format: date }
+                  period_end: { type: string, format: date }
+                  spent: { $ref: "#/components/schemas/Money" }
+                  by_category:
+                    type: array
+                    items:
+                      type: object
+                      required: [category, spent]
+                      properties:
+                        category: { type: string }
+                        spent: { $ref: "#/components/schemas/Money" }
+
+  /groups:
+    get:
+      tags: [Сплит]
+      summary: Мои группы с моим балансом
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/GroupShort" } } } }
+    post:
+      tags: [Сплит]
+      summary: Создать группу (создатель — первый участник)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Group" } } }, description: Создана }
+        "400": { $ref: "#/components/responses/Invalid" }
+
+  /groups/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Сплит]
+      summary: Группа с участниками
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Group" } } }, description: OK }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/members/me:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    delete:
+      tags: [Сплит]
+      summary: Выйти из группы — только при нулевом балансе
+      responses:
+        "204": { description: Вышел }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /groups/{id}/invites:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      tags: [Сплит]
+      summary: Ссылка-приглашение (действует 7 дней)
+      responses:
+        "201":
+          description: Создана
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, url, expires_at]
+                properties:
+                  token: { type: string }
+                  url: { type: string, examples: ["https://kampus.example/invite/q8Zt3k"] }
+                  expires_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invites/{token}:
+    parameters: [{ $ref: "#/components/parameters/Token" }]
+    get:
+      tags: [Сплит]
+      summary: Куда зовут — название группы и число участников
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [group_name, members]
+                properties:
+                  group_name: { type: string }
+                  members: { type: integer }
+        "404": { description: Ссылка неверная или истекла }
+
+  /invites/{token}/accept:
+    parameters: [{ $ref: "#/components/parameters/Token" }]
+    post:
+      tags: [Сплит]
+      summary: Вступить в группу
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Group" } } }, description: Вступил (повторно — тоже 200) }
+        "404": { description: Ссылка неверная или истекла }
+
+  /groups/{id}/expenses:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Сплит]
+      summary: Расходы группы, новые сверху
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Expense" } }
+                  next: { $ref: "#/components/schemas/NextCursor" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Сплит]
+      summary: Добавить общий расход — делится поровну до копейки
+      description: Каждому floor(amount / n), остаток — по копейке первым по порядку вступления. Сумма долей равна amount.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ExpenseInput" } } }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Expense" } } }, description: Создан }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/expenses/{expenseId}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { name: expenseId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Сплит]
+      summary: Удалить расход — может только тот, кто его добавил
+      responses:
+        "204": { description: Удалён }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/balances:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Сплит]
+      summary: Балансы участников (плюс — ему должны)
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Balance" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/settle-plan:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Сплит]
+      summary: Кто кому сколько перевести, минимум переводов (желательное)
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Debt" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/settlements:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      tags: [Сплит]
+      summary: Отметить, что вернул долг (желательное)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_user_id, amount]
+              properties:
+                to_user_id: { type: string }
+                amount: { $ref: "#/components/schemas/Money" }
+      responses:
+        "201": { description: "Записано, балансы пересчитаны" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /transfers/check:
+    post:
+      tags: [Защита]
+      summary: Проверить перевод до отправки
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TransferInput" } } }
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Check" } } }, description: OK }
+        "400": { $ref: "#/components/responses/Invalid" }
+
+  /transfers:
+    get:
+      tags: [Защита]
+      summary: Мои смоделированные переводы
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Transfer" } } } }
+    post:
+      tags: [Защита]
+      summary: Смоделировать перевод после проверки
+      description: При риске high без confirmed=true — 409, фронтенд показывает шторку предупреждения. Деньги никуда не уходят; трата попадает в бюджет.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [check_id, confirmed]
+              properties:
+                check_id: { type: string }
+                confirmed: { type: boolean, description: Пользователь прочитал предупреждение и всё равно переводит }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Transfer" } } }, description: Создан }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /schemes:
+    get:
+      tags: [Защита]
+      summary: Справочник схем мошенников с признаками (желательное)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Scheme" } } } }
+
+  /deals:
+    get:
+      tags: [Скидки]
+      summary: Каталог студенческих предложений
+      security: []
+      parameters:
+        - { name: category, in: query, schema: { type: string } }
+        - { name: campus, in: query, schema: { $ref: "#/components/schemas/Campus" } }
+        - { name: favorite, in: query, description: Только избранное (нужен вход), schema: { type: boolean } }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Deal" } }
+                  next: { $ref: "#/components/schemas/NextCursor" }
+
+  /deals/categories:
+    get:
+      tags: [Скидки]
+      summary: Категории каталога
+      security: []
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Category" } } } }
+
+  /deals/{id}/favorite:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    put:
+      tags: [Скидки]
+      summary: В избранное (желательное)
+      responses:
+        "204": { description: Добавлено }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Скидки]
+      summary: Убрать из избранного (желательное)
+      responses:
+        "204": { description: Убрано }
+
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: kampus_session }
+
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string } }
+    Token: { name: token, in: path, required: true, schema: { type: string } }
+    Cursor: { name: cursor, in: query, description: Значение next из прошлого ответа, schema: { type: string } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+
+  responses:
+    Invalid:
+      description: Неверные данные; fields — ошибка по каждому полю
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: Нет сессии или неверный пароль
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Нет такого ресурса или он чужой
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: Действие сейчас невозможно (почта занята, ненулевой баланс, нужно подтверждение)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    TooMany:
+      description: Больше 5 попыток входа за 15 минут
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Money:
+      type: integer
+      description: Копейки. 15050 = 150,50 ₽
+      examples: [15050]
+    NextCursor:
+      type: [string, "null"]
+      description: null — дальше ничего нет
+    Campus:
+      type: string
+      enum: [vernadka, stromynka, sokolinaya, malaya-pirogovskaya, other]
+      description: Корпус РТУ МИРЭА — для скидок рядом
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [validation_error, unauthorized, not_found, conflict, confirm_required, too_many_requests, internal]
+            message: { type: string, description: "Текст для человека, по-русски" }
+            fields:
+              type: object
+              additionalProperties: { type: string }
+              examples: [{ amount: "Сумма должна быть больше нуля" }]
+    User:
+      type: object
+      required: [id, email, name, campus, created_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        campus: { oneOf: [{ $ref: "#/components/schemas/Campus" }, { type: "null" }] }
+        created_at: { type: string, format: date-time }
+    BudgetInput:
+      type: object
+      required: [amount, next_payday]
+      properties:
+        amount: { $ref: "#/components/schemas/Money" }
+        next_payday: { type: string, format: date, description: "Дата следующей стипендии, позже сегодня" }
+    Budget:
+      allOf:
+        - $ref: "#/components/schemas/BudgetInput"
+        - type: object
+          required: [period_start]
+          properties:
+            period_start: { type: string, format: date, description: С этого дня считаются траты периода }
+    Today:
+      type: object
+      description: |
+        limit = floor(left_morning / days_left); left_today = limit − spent_today.
+        left_today < 0 — перерасход, он уменьшит лимит следующих дней.
+      required: [date, days_left, left_morning, limit, spent_today, left_today, period_left]
+      properties:
+        date: { type: string, format: date }
+        days_left: { type: integer, minimum: 1, description: "До следующей стипендии, включая сегодня" }
+        left_morning: { $ref: "#/components/schemas/Money" }
+        limit: { $ref: "#/components/schemas/Money" }
+        spent_today: { $ref: "#/components/schemas/Money" }
+        left_today: { $ref: "#/components/schemas/Money" }
+        period_left: { $ref: "#/components/schemas/Money" }
+    Category:
+      type: object
+      required: [id, title]
+      properties:
+        id: { type: string, examples: [food] }
+        title: { type: string, examples: [Еда] }
+    OperationInput:
+      type: object
+      required: [kind, amount, category]
+      properties:
+        kind: { type: string, enum: [expense, income] }
+        amount: { $ref: "#/components/schemas/Money", minimum: 1 }
+        category: { type: string }
+        note: { type: string, maxLength: 120 }
+        date: { type: string, format: date, description: По умолчанию сегодня }
+    Operation:
+      allOf:
+        - $ref: "#/components/schemas/OperationInput"
+        - type: object
+          required: [id, date, source]
+          properties:
+            id: { type: string }
+            source: { type: string, enum: [manual, transfer, split], description: Откуда операция }
+    Member:
+      type: object
+      required: [user_id, name, joined_at]
+      properties:
+        user_id: { type: string }
+        name: { type: string }
+        joined_at: { type: string, format: date-time }
+    GroupShort:
+      type: object
+      required: [id, name, members, my_balance]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        members: { type: integer }
+        my_balance: { $ref: "#/components/schemas/Money" }
+    Group:
+      type: object
+      required: [id, name, members, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        members: { type: array, items: { $ref: "#/components/schemas/Member" } }
+        created_at: { type: string, format: date-time }
+    ExpenseInput:
+      type: object
+      required: [title, amount]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 80, examples: [Продукты на неделю] }
+        amount: { $ref: "#/components/schemas/Money", minimum: 1 }
+        paid_by: { type: string, description: Кто заплатил; по умолчанию я }
+        participants: { type: array, items: { type: string }, minItems: 1, description: Между кем делить; по умолчанию все участники }
+    Expense:
+      type: object
+      required: [id, title, amount, paid_by, shares, created_by, created_at]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        paid_by: { type: string }
+        shares:
+          type: array
+          items:
+            type: object
+            required: [user_id, amount]
+            properties:
+              user_id: { type: string }
+              amount: { $ref: "#/components/schemas/Money" }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+    Balance:
+      type: object
+      required: [user_id, name, balance]
+      properties:
+        user_id: { type: string }
+        name: { type: string }
+        balance: { $ref: "#/components/schemas/Money" }
+    Debt:
+      type: object
+      required: [from_user_id, to_user_id, amount]
+      properties:
+        from_user_id: { type: string }
+        to_user_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+    TransferInput:
+      type: object
+      required: [recipient, amount]
+      properties:
+        recipient: { type: string, maxLength: 100, description: "Кому — имя, телефон или ник, без номеров карт" }
+        amount: { $ref: "#/components/schemas/Money", minimum: 1 }
+        purpose: { type: string, maxLength: 200, examples: [Оплата общежития] }
+        message: { type: string, maxLength: 2000, description: "Текст сообщения, в котором просят перевести" }
+        link: { type: string, maxLength: 500, description: "Ссылка из сообщения, если есть" }
+    Sign:
+      type: object
+      required: [code, title, hint]
+      properties:
+        code: { type: string, examples: [urgency, fake_dean, foreign_link, sms_code, private_person] }
+        title: { type: string, examples: [Торопят] }
+        hint: { type: string, examples: [Деканат не требует оплаты за час. Позвоните в деканат по номеру с сайта вуза.] }
+    Check:
+      type: object
+      required: [id, risk, signs]
+      properties:
+        id: { type: string }
+        risk: { type: string, enum: [low, medium, high] }
+        signs: { type: array, items: { $ref: "#/components/schemas/Sign" } }
+    Transfer:
+      type: object
+      required: [id, recipient, amount, risk, confirmed_warning, created_at]
+      properties:
+        id: { type: string }
+        recipient: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        purpose: { type: string }
+        risk: { type: string, enum: [low, medium, high] }
+        confirmed_warning: { type: boolean }
+        created_at: { type: string, format: date-time }
+    Scheme:
+      type: object
+      required: [id, title, description, signs]
+      properties:
+        id: { type: string }
+        title: { type: string, examples: ["«Деканат» в Telegram"] }
+        description: { type: string }
+        signs: { type: array, items: { type: string } }
+    Deal:
+      type: object
+      required: [id, title, partner, category, discount, campus, favorite]
+      properties:
+        id: { type: string }
+        title: { type: string, examples: [Кофе −20% по студенческому] }
+        partner: { type: string }
+        category: { type: string }
+        discount: { type: string, examples: ["−20%"] }
+        conditions: { type: string }
+        address: { type: string }
+        campus: { type: array, items: { $ref: "#/components/schemas/Campus" } }
+        url: { type: string }
+        valid_until: { type: [string, "null"], format: date }
+        favorite: { type: boolean, description: false для гостя }
